@@ -1,0 +1,110 @@
+#!/bin/bash
+
+# =============================================================================
+# ------------------------------ tIDE (tmux IDE) ------------------------------
+# =============================================================================
+#
+# tide: launch a tmux session with Neovim on the left and Claude Code on the right.
+#
+# Requires tmux >= 3.7b: 3.7a has a bug where content drawn inside a
+# synchronized update (which Neovim uses for its frames) is not redrawn to
+# the terminal, leaving the Neovim pane blank until something else forces a
+# repaint. Fixed upstream in 3.7b ("Fix so that the end of a synchronized
+# update again triggers a redraw").
+#
+# When the editor or the secondary command exits, its pane drops into the
+# interactive shell instead of closing (the same behavior you'd get if you'd
+# opened the pane manually and run the program yourself). Exit the shell
+# (Ctrl+D or `exit`) to actually close the pane.
+
+# =============================================================================
+
+# Parse command line options.
+usage() {
+  echo "Usage: $0 [-s SESSION] [-w WINDOW] [-d DIR] [-h|-v] [-l SIZE] [-e EDITOR] [-c COMMAND]"
+  echo "  -s SESSION   Session name (default: tide)"
+  echo "  -w WINDOW    Window name (default: main)"
+  echo "  -d DIR       Start directory (default: .)"
+  echo "  -h           Horizontal split, side-by-side (default)"
+  echo "  -v           Vertical split, stacked"
+  echo "  -l SIZE      Split size (default: 40%)"
+  echo "  -e EDITOR    Editor command for main pane (default: 'nvim .')"
+  echo "  -c COMMAND   Command for split pane  (default: claude)"
+  exit 1
+}
+
+# Defaults:
+session_name="tide"
+window_name="main"
+start_directory="."
+layout="-h"
+size="50%"
+editor="nvim"
+command="claude"
+
+while getopts ":s:w:d:hvl:e:c:" opt; do
+  case $opt in
+    s) session_name="$OPTARG" ;;
+    w) window_name="$OPTARG" ;;
+    d) start_directory="$OPTARG" ;;
+    h) layout="-h" ;;
+    v) layout="-v" ;;
+    l) size="$OPTARG" ;;
+    e) editor="$OPTARG" ;;
+    c) command="$OPTARG" ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      usage
+      ;;
+    :)
+      echo "Option -$OPTARG requires an argument." >&2
+      usage
+      ;;
+  esac
+done
+
+# Validate size format (accepts % or digits).
+if ! [[ $size =~ ^[0-9]+%?$ ]]; then
+  echo "Error: Invalid size format: $size" >&2
+  usage
+fi
+
+# If the session already exists, just attach.
+if tmux has-session -t "$session_name" 2>/dev/null; then
+  tmux attach -t "$session_name"
+  exit 0
+fi
+
+# Use the user's interactive shell when the program exits, so the pane
+# stays open. Falls back to /bin/sh in the unlikely case $SHELL is unset.
+shell="${SHELL:-/bin/sh}"
+
+# Pane targets for the main (editor) and split pane, by position.
+if [ "$layout" = "-h" ]; then
+  main_pane='{left}'
+  side_pane='{right}'
+else
+  main_pane='{top}'
+  side_pane='{bottom}'
+fi
+
+# Everything happens in one tmux invocation, in this order:
+#
+#   1. new-session (attached)  - the session is created at the terminal's
+#      real size, since tmux gets it directly from the attaching client.
+#   2. split-window            - the layout is built while both panes still
+#      run plain shells. (-d keeps focus on the editor pane.)
+#   3. respawn-pane x2         - the editor and the secondary command are
+#      launched into the finished, final-sized panes.
+#
+# Launching the programs only after the layout is done matters: Neovim 0.12
+# sizes its UI once at startup and can miss resizes that arrive while it is
+# still initializing (vim.pack runs synchronously during startup), leaving
+# it permanently rendered at the wrong size. Done this way, its pane already
+# has its final size before it starts and is never resized afterwards.
+#
+# `; exec "$shell"` drops a pane into your shell once its program exits.
+exec tmux new-session -s "$session_name" -n "$window_name" -c "$start_directory" \; \
+  split-window -d "$layout" -l "$size" -c "$start_directory" \; \
+  respawn-pane -k -t "$main_pane" -c "$start_directory" "$editor; exec \"$shell\"" \; \
+  respawn-pane -k -t "$side_pane" -c "$start_directory" "$command; exec \"$shell\""
