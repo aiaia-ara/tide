@@ -19,18 +19,23 @@
 
 # =============================================================================
 
+# Exit on use of an unset variable, so a mistyped name fails loudly instead of
+# quietly expanding to an empty string.
+set -u
+
 # Parse command line options.
 usage() {
-  echo "Usage: $0 [-s SESSION] [-w WINDOW] [-d DIR] [-h|-v] [-l SIZE] [-e EDITOR] [-c COMMAND]"
+  echo "Usage: $0 [-s SESSION] [-w WINDOW] [-d DIR] [-H|-V] [-l SIZE] [-e EDITOR] [-c COMMAND] [-h]"
   echo "  -s SESSION   Session name (default: tide)"
   echo "  -w WINDOW    Window name (default: main)"
   echo "  -d DIR       Start directory (default: .)"
-  echo "  -h           Horizontal split, side-by-side (default)"
-  echo "  -v           Vertical split, stacked"
-  echo "  -l SIZE      Split size (default: 40%)"
-  echo "  -e EDITOR    Editor command for main pane (default: 'nvim .')"
+  echo "  -H           Horizontal split, side-by-side (default)"
+  echo "  -V           Vertical split, stacked"
+  echo "  -l SIZE      Split size, 1-99% or an absolute number (default: 50%)"
+  echo "  -e EDITOR    Editor command for main pane (default: nvim)"
   echo "  -c COMMAND   Command for split pane  (default: claude)"
-  exit 1
+  echo "  -h           Show this help"
+  exit "${1:-1}"
 }
 
 # Defaults:
@@ -40,18 +45,21 @@ start_directory="."
 layout="-h"
 size="50%"
 editor="nvim"
-command="claude"
+side_command="claude"
 
-while getopts ":s:w:d:hvl:e:c:" opt; do
+# -H and -V select the split orientation. The values they store are tmux's own
+# split-window flags, where -h splits side-by-side and -v splits stacked.
+while getopts ":s:w:d:HVl:e:c:h" opt; do
   case $opt in
     s) session_name="$OPTARG" ;;
     w) window_name="$OPTARG" ;;
     d) start_directory="$OPTARG" ;;
-    h) layout="-h" ;;
-    v) layout="-v" ;;
+    H) layout="-h" ;;
+    V) layout="-v" ;;
     l) size="$OPTARG" ;;
     e) editor="$OPTARG" ;;
-    c) command="$OPTARG" ;;
+    c) side_command="$OPTARG" ;;
+    h) usage 0 ;;
     \?)
       echo "Invalid option: -$OPTARG" >&2
       usage
@@ -63,9 +71,10 @@ while getopts ":s:w:d:hvl:e:c:" opt; do
   esac
 done
 
-# Validate size format (accepts % or digits).
-if ! [[ $size =~ ^[0-9]+%?$ ]]; then
-  echo "Error: Invalid size format: $size" >&2
+# Validate size: 1-99% of the window, which has to leave room for both panes,
+# or an absolute number of rows/columns.
+if ! [[ $size =~ ^([1-9][0-9]?%|[1-9][0-9]*)$ ]]; then
+  echo "Error: size must be 1-99% or a positive number: $size" >&2
   usage
 fi
 
@@ -107,4 +116,4 @@ fi
 exec tmux new-session -s "$session_name" -n "$window_name" -c "$start_directory" \; \
   split-window -d "$layout" -l "$size" -c "$start_directory" \; \
   respawn-pane -k -t "$main_pane" -c "$start_directory" "$editor; exec \"$shell\"" \; \
-  respawn-pane -k -t "$side_pane" -c "$start_directory" "$command; exec \"$shell\""
+  respawn-pane -k -t "$side_pane" -c "$start_directory" "$side_command; exec \"$shell\""
