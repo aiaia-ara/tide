@@ -1,14 +1,15 @@
 # tIDE (tmux IDE)
 
-A single shell script that opens a tmux session with your editor in one pane and
-Claude Code in the other.
+A single shell script that opens a tmux session with your editor in one pane,
+Claude Code in another, and a shell across the bottom.
 
 ```
 ┌────────────────────────┬──────────────────┐
-│                        │                  │
 │         nvim           │      claude      │
 │                        │                  │
-└────────────────────────┴──────────────────┘
+├────────────────────────┴──────────────────┤
+│                  console                  │
+└───────────────────────────────────────────┘
 ```
 
 ## Requirements
@@ -41,9 +42,10 @@ ln -s "$PWD/tide/bin/tide" ~/.local/bin/tide
 ## Usage
 
 ```sh
-tide                      # nvim | claude, side by side, 50/50, in the current directory
+tide                      # nvim | claude side by side, console below, in the current directory
 tide -d ~/projects/foo    # start somewhere else
 tide -V -l 30%            # stacked instead, secondary pane gets 30%
+tide -b 30%               # roomier console
 tide -e 'nvim .' -c lazygit
 ```
 
@@ -57,10 +59,15 @@ creating a second one.
 | `-d DIR` | Start directory | `.` |
 | `-H` | Horizontal split, side by side | (default) |
 | `-V` | Vertical split, stacked | |
-| `-l SIZE` | Split size: `1%`–`99%`, or an absolute number of rows/columns | `50%` |
+| `-l SIZE` | Size of the split pane: `1%`–`99%`, or an absolute number of rows/columns | `50%` |
+| `-b SIZE` | Height of the bottom console: `1%`–`99%`, or an absolute number of rows | `15%` |
 | `-e EDITOR` | Command for the main pane | `nvim` |
 | `-c COMMAND` | Command for the split pane | `claude` |
 | `-h` | Show help | |
+
+`-l` sizes the *split* pane, not the editor, so `-l 70%` gives 70% to `claude`
+and the remaining 30% to `nvim`. `-b` is measured against the whole window, and
+the console spans its full width whether you use `-H` or `-V`.
 
 `-e` and `-c` take a shell command, not just a program name, which is why
 `-e 'nvim .'` works. Quotes inside the value have to balance.
@@ -70,7 +77,8 @@ creating a second one.
 **Panes stay open when their program exits.** Quitting Neovim drops that pane
 into your shell rather than closing it, the same as if you had opened the pane
 and run the program yourself. Exit the shell (`Ctrl+D` or `exit`) to actually
-close the pane.
+close the pane. The console pane is already just your shell, so one `Ctrl+D`
+closes it.
 
 **It cannot be run from inside tmux.** Launch it from a plain terminal. Running
 it from within an existing tmux session fails with `sessions should be nested
@@ -81,11 +89,22 @@ consideration.
 ## Why it is built the way it is
 
 The script does everything in one tmux invocation, and deliberately builds the
-layout *before* launching either program: `new-session`, then `split-window`,
-then `respawn-pane` into each finished pane.
+layout *before* launching either program: `new-session`, then both
+`split-window`s, then `respawn-pane` into each finished pane.
 
 That ordering is load-bearing. Neovim 0.12 sizes its UI once at startup and can
 miss resize events that arrive while it is still initialising, since `vim.pack`
 runs synchronously during startup. Launching it into a pane that already has its
 final size means it is never resized afterwards, so it cannot end up permanently
-rendered at the wrong dimensions.
+rendered at the wrong dimensions. The console split has to come before the
+respawns for the same reason — being full width, it shortens both of the panes
+above it.
+
+The console itself needs no `respawn-pane`: `split-window` already starts an
+interactive shell in the start directory, which is all a console is.
+
+Pane targets are `{top-left}` for the editor and a direction relative to it
+(`{right-of}` or `{down-of}`) for the split pane. The absolute tokens the script
+used when there were only two panes no longer work — with three panes open,
+`{top}` matches whichever of the two upper panes tmux reaches first, which is not
+necessarily the editor.
