@@ -4,7 +4,8 @@
 # ------------------------------ tIDE (tmux IDE) ------------------------------
 # =============================================================================
 #
-# tide: launch a tmux session with Neovim on the left and Claude Code on the right.
+# tide: launch a tmux session with Neovim on the left, Claude Code on the right,
+# and a shell across the bottom.
 #
 # Requires tmux >= 3.7b: 3.7a has a bug where content drawn inside a
 # synchronized update (which Neovim uses for its frames) is not redrawn to
@@ -25,13 +26,14 @@ set -u
 
 # Parse command line options.
 usage() {
-  echo "Usage: $0 [-s SESSION] [-w WINDOW] [-d DIR] [-H|-V] [-l SIZE] [-e EDITOR] [-c COMMAND] [-h]"
+  echo "Usage: $0 [-s SESSION] [-w WINDOW] [-d DIR] [-H|-V] [-l SIZE] [-b SIZE] [-e EDITOR] [-c COMMAND] [-h]"
   echo "  -s SESSION   Session name (default: tide)"
   echo "  -w WINDOW    Window name (default: main)"
   echo "  -d DIR       Start directory (default: .)"
   echo "  -H           Horizontal split, side-by-side (default)"
   echo "  -V           Vertical split, stacked"
-  echo "  -l SIZE      Split size, 1-99% or an absolute number (default: 50%)"
+  echo "  -l SIZE      Editor/command split size, 1-99% or absolute (default: 50%)"
+  echo "  -b SIZE      Bottom console size, 1-99% or absolute (default: 15%)"
   echo "  -e EDITOR    Editor command for main pane (default: nvim)"
   echo "  -c COMMAND   Command for split pane  (default: claude)"
   echo "  -h           Show this help"
@@ -43,20 +45,27 @@ session_name="tide"
 window_name="main"
 start_directory="."
 layout="-h"
+side_pane='{right-of}'
 size="50%"
+console_size="15%"
 editor="nvim"
 side_command="claude"
 
 # -H and -V select the split orientation. The values they store are tmux's own
-# split-window flags, where -h splits side-by-side and -v splits stacked.
-while getopts ":s:w:d:HVl:e:c:h" opt; do
+# split-window flags, where -h splits side-by-side and -v splits stacked, plus
+# the pane target for the secondary command. That target is a direction
+# relative to the active (editor) pane because with three panes open the
+# absolute tokens stop being unique: {top} matches whichever of the two upper
+# panes tmux reaches first, not the editor.
+while getopts ":s:w:d:HVl:b:e:c:h" opt; do
   case $opt in
     s) session_name="$OPTARG" ;;
     w) window_name="$OPTARG" ;;
     d) start_directory="$OPTARG" ;;
-    H) layout="-h" ;;
-    V) layout="-v" ;;
+    H) layout="-h"; side_pane='{right-of}' ;;
+    V) layout="-v"; side_pane='{down-of}' ;;
     l) size="$OPTARG" ;;
+    b) console_size="$OPTARG" ;;
     e) editor="$OPTARG" ;;
     c) side_command="$OPTARG" ;;
     h) usage 0 ;;
@@ -71,12 +80,16 @@ while getopts ":s:w:d:HVl:e:c:h" opt; do
   esac
 done
 
-# Validate size: 1-99% of the window, which has to leave room for both panes,
-# or an absolute number of rows/columns.
-if ! [[ $size =~ ^([1-9][0-9]?%|[1-9][0-9]*)$ ]]; then
-  echo "Error: size must be 1-99% or a positive number: $size" >&2
-  usage
-fi
+# Validate a split size: 1-99% of the window, which has to leave room for the
+# other panes, or an absolute number of rows/columns.
+check_size() {
+  if ! [[ $2 =~ ^([1-9][0-9]?%|[1-9][0-9]*)$ ]]; then
+    echo "Error: $1 must be 1-99% or a positive number: $2" >&2
+    usage
+  fi
+}
+check_size -l "$size"
+check_size -b "$console_size"
 
 # If the session already exists, just attach.
 if tmux has-session -t "$session_name" 2>/dev/null; then
@@ -88,32 +101,30 @@ fi
 # stays open. Falls back to /bin/sh in the unlikely case $SHELL is unset.
 shell="${SHELL:-/bin/sh}"
 
-# Pane targets for the main (editor) and split pane, by position.
-if [ "$layout" = "-h" ]; then
-  main_pane='{left}'
-  side_pane='{right}'
-else
-  main_pane='{top}'
-  side_pane='{bottom}'
-fi
-
 # Everything happens in one tmux invocation, in this order:
 #
 #   1. new-session (attached)  - the session is created at the terminal's
 #      real size, since tmux gets it directly from the attaching client.
-#   2. split-window            - the layout is built while both panes still
-#      run plain shells. (-d keeps focus on the editor pane.)
+#   2. split-window x2         - the layout is built while every pane still
+#      runs a plain shell. (-d keeps focus on the editor pane.) The console
+#      split takes -f so it spans the full window width, underneath both of
+#      the other panes, in either orientation.
 #   3. respawn-pane x2         - the editor and the secondary command are
-#      launched into the finished, final-sized panes.
+#      launched into the finished, final-sized panes. The console needs no
+#      respawn: split-window has already given it an interactive shell in
+#      the start directory, which is all a console is.
 #
 # Launching the programs only after the layout is done matters: Neovim 0.12
 # sizes its UI once at startup and can miss resizes that arrive while it is
 # still initializing (vim.pack runs synchronously during startup), leaving
 # it permanently rendered at the wrong size. Done this way, its pane already
-# has its final size before it starts and is never resized afterwards.
+# has its final size before it starts and is never resized afterwards. The
+# console split has to come before the respawns for the same reason: being
+# full width, it shortens both of the panes above it.
 #
 # `; exec "$shell"` drops a pane into your shell once its program exits.
 exec tmux new-session -s "$session_name" -n "$window_name" -c "$start_directory" \; \
   split-window -d "$layout" -l "$size" -c "$start_directory" \; \
-  respawn-pane -k -t "$main_pane" -c "$start_directory" "$editor; exec \"$shell\"" \; \
+  split-window -d -v -f -l "$console_size" -c "$start_directory" \; \
+  respawn-pane -k -t '{top-left}' -c "$start_directory" "$editor; exec \"$shell\"" \; \
   respawn-pane -k -t "$side_pane" -c "$start_directory" "$side_command; exec \"$shell\""
