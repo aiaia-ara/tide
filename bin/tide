@@ -114,7 +114,11 @@ if [[ -n $venv ]]; then
     echo "Error: -p is not a virtualenv (no bin/activate): $venv" >&2
     usage
   fi
-  venv=$(cd "$venv" && pwd)
+  if ! resolved=$(cd "$venv" && pwd); then
+    echo "Error: -p exists but cannot be entered: $venv" >&2
+    usage
+  fi
+  venv=$resolved
 fi
 
 # If the session already exists, just attach.
@@ -164,13 +168,20 @@ shell="${SHELL:-/bin/sh}"
 # whatever tmux gave that pane - expanding it here would freeze tide's own PATH
 # into every pane instead. The format string below is single-quoted precisely so
 # that cannot happen: $PATH is literal by construction rather than by an escape
-# somebody could drop. Values arrive through %s. printf -v assigns without a
-# subshell.
+# somebody could drop. printf -v assigns without a subshell.
+#
+# The paths go in with %q, not %s. This string crosses a parsing boundary: tide
+# writes it, and the pane's shell later parses it as code. %s would copy a path
+# in raw, so a $ in it would be expanded away by that shell and a backtick would
+# be executed - silently, since the result is a plausible-looking wrong path.
+# %q escapes the value so re-parsing yields the bytes back. It is a bashism, but
+# tide is already bash-only, and every form it emits here (backslash escapes,
+# and $'...' for control characters) is understood by zsh.
 venv_prefix=""
 if [[ -n $venv ]]; then
   printf -v venv_prefix \
-    'export VIRTUAL_ENV="%s" VIRTUAL_ENV_PROMPT="%s"; export PATH="%s/bin:$PATH"; ' \
-    "$venv" "${venv##*/}" "$venv"
+    'export VIRTUAL_ENV=%q VIRTUAL_ENV_PROMPT=%q; export PATH=%q:$PATH; ' \
+    "$venv" "${venv##*/}" "$venv/bin"
 fi
 
 # Everything happens in one tmux invocation, in this order:
