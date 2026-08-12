@@ -17,6 +17,10 @@
 # interactive shell instead of closing (the same behavior you'd get if you'd
 # opened the pane manually and run the program yourself). Exit the shell
 # (Ctrl+D or `exit`) to actually close the pane.
+#
+# Panes run a plain shell rather than a login shell, so the environment tide was
+# launched with is inherited intact instead of being rebuilt in each pane. See
+# the comment above the tmux invocation for why that matters.
 
 # =============================================================================
 
@@ -26,7 +30,7 @@ set -u
 
 # Parse command line options.
 usage() {
-  echo "Usage: $0 [-s SESSION] [-w WINDOW] [-d DIR] [-H|-V] [-l SIZE] [-b SIZE] [-e EDITOR] [-c COMMAND] [-h]"
+  echo "Usage: $0 [-s SESSION] [-w WINDOW] [-d DIR] [-H|-V] [-l SIZE] [-b SIZE] [-e EDITOR] [-c COMMAND] [-p VENV] [-h]"
   echo "  -s SESSION   Session name (default: tide)"
   echo "  -w WINDOW    Window name (default: main)"
   echo "  -d DIR       Start directory (default: .)"
@@ -36,6 +40,7 @@ usage() {
   echo "  -b SIZE      Bottom console size, 1-99% or absolute (default: 15%)"
   echo "  -e EDITOR    Editor command for main pane (default: nvim)"
   echo "  -c COMMAND   Command for split pane  (default: claude)"
+  echo "  -p VENV      Python virtualenv to launch every pane in"
   echo "  -h           Show this help"
   exit "${1:-1}"
 }
@@ -50,6 +55,7 @@ size="50%"
 console_size="15%"
 editor="nvim"
 side_command="claude"
+venv=""
 
 # -H and -V select the split orientation. The values they store are tmux's own
 # split-window flags, where -h splits side-by-side and -v splits stacked, plus
@@ -57,7 +63,7 @@ side_command="claude"
 # relative to the active (editor) pane because with three panes open the
 # absolute tokens stop being unique: {top} matches whichever of the two upper
 # panes tmux reaches first, not the editor.
-while getopts ":s:w:d:HVl:b:e:c:h" opt; do
+while getopts ":s:w:d:HVl:b:e:c:p:h" opt; do
   case $opt in
     s) session_name="$OPTARG" ;;
     w) window_name="$OPTARG" ;;
@@ -68,6 +74,7 @@ while getopts ":s:w:d:HVl:b:e:c:h" opt; do
     b) console_size="$OPTARG" ;;
     e) editor="$OPTARG" ;;
     c) side_command="$OPTARG" ;;
+    p) venv="$OPTARG" ;;
     h) usage 0 ;;
     \?)
       echo "Invalid option: -$OPTARG" >&2
@@ -91,8 +98,43 @@ check_size() {
 check_size -l "$size"
 check_size -b "$console_size"
 
+# Resolve -p against the start directory, so `-d ~/proj -p .venv` means
+# ~/proj/.venv rather than something relative to wherever tide was typed, and
+# check it here so a typo dies now instead of three panes later.
+#
+# The `cd && pwd` is not cosmetic. Left relative, `-p .venv` would put
+# ./.venv/bin on PATH, and a relative PATH entry means "relative to wherever the
+# process asking happens to be standing" - so it would quietly stop finding the
+# venv on the first `cd`. VIRTUAL_ENV must be absolute for the same reason.
+# Plain `pwd` keeps the logical path, so a venv reached through a symlink still
+# reads as the path you recognize.
+if [[ -n $venv ]]; then
+  [[ $venv == /* ]] || venv="$start_directory/$venv"
+  if [[ ! -r "$venv/bin/activate" ]]; then
+    echo "Error: -p is not a virtualenv (no bin/activate): $venv" >&2
+    usage
+  fi
+  venv=$(cd "$venv" && pwd)
+fi
+
 # If the session already exists, just attach.
+#
+# -p is the one option where that is worth saying out loud. Attaching runs none
+# of the setup below, so the panes keep whatever environment they were started
+# with, and asking for a virtualenv would otherwise appear to do nothing at all.
+# Every other option is silently ignored here too, but none of them look broken
+# when they are. The prompt is skipped when stdin is not a terminal, so tide
+# still works unattended.
 if tmux has-session -t "$session_name" 2>/dev/null; then
+  if [[ -n $venv ]]; then
+    echo "Note: session '$session_name' already exists. Attaching leaves its panes" >&2
+    echo "in the environment they were started with, so -p will have no effect." >&2
+    if [[ -t 0 ]]; then
+      reply=""
+      read -r -p "Attach anyway? [y/N] " reply
+      [[ $reply == [yY]* ]] || exit 1
+    fi
+  fi
   tmux attach -t "$session_name"
   exit 0
 fi
@@ -101,18 +143,62 @@ fi
 # stays open. Falls back to /bin/sh in the unlikely case $SHELL is unset.
 shell="${SHELL:-/bin/sh}"
 
+# A virtualenv has to be written into the command each pane runs, because of how
+# tmux decides a pane's PATH. It takes it from the client that asked for the
+# pane, but only while that client is still unattached - spawn.c reads
+# `if (c != NULL && c->session == NULL)` - and otherwise from the session
+# environment. tide's new-session attaches, so every command chained after it,
+# which is all of them, falls into the second case.
+#
+# That defeats both of the obvious alternatives. Exporting the virtualenv here
+# before `exec tmux` reaches the panes only when tide happens to fork the tmux
+# server, and a server outlives any one session, so usually it does not. And
+# `new-session -e PATH=`, `split-window -e PATH=` and `set-environment -g PATH`
+# are all overwritten by that same block, whatever the manual says.
+#
+# A command string depends on neither, since tmux runs it verbatim. Sourcing
+# bin/activate would add nothing over it either: each pane ends in
+# `exec "$shell"`, which keeps only exported variables.
+#
+# $PATH has to reach the pane unexpanded, so that it resolves there, against
+# whatever tmux gave that pane - expanding it here would freeze tide's own PATH
+# into every pane instead. The format string below is single-quoted precisely so
+# that cannot happen: $PATH is literal by construction rather than by an escape
+# somebody could drop. Values arrive through %s. printf -v assigns without a
+# subshell.
+venv_prefix=""
+if [[ -n $venv ]]; then
+  printf -v venv_prefix \
+    'export VIRTUAL_ENV="%s" VIRTUAL_ENV_PROMPT="%s"; export PATH="%s/bin:$PATH"; ' \
+    "$venv" "${venv##*/}" "$venv"
+fi
+
 # Everything happens in one tmux invocation, in this order:
 #
 #   1. new-session (attached)  - the session is created at the terminal's
 #      real size, since tmux gets it directly from the attaching client.
-#   2. split-window x2         - the layout is built while every pane still
+#   2. set-option              - default-command is what tmux runs in a pane
+#      started without a command. Empty, its default, means a login shell,
+#      which on macOS re-runs /etc/zprofile's path_helper; that rebuilds PATH
+#      with the system directories first and demotes whatever a parent put in
+#      front, a virtualenv included. A plain shell keeps what it was handed,
+#      makes the console match the other two panes - whose fallback shells are
+#      already plain - and skips a ~17ms ~/.zprofile in every pane. It is also
+#      where -p rides for the console and for any pane opened later, since
+#      those are the panes tmux starts without a command of their own.
+#   3. split-window x2         - the layout is built while every pane still
 #      runs a plain shell. (-d keeps focus on the editor pane.) The console
 #      split takes -f so it spans the full window width, underneath both of
 #      the other panes, in either orientation.
-#   3. respawn-pane x2         - the editor and the secondary command are
+#   4. respawn-pane x2         - the editor and the secondary command are
 #      launched into the finished, final-sized panes. The console needs no
 #      respawn: split-window has already given it an interactive shell in
 #      the start directory, which is all a console is.
+#
+# set-option has to precede the console split-window, since that is the pane
+# which reads the option. new-session creates the first pane before it is set,
+# but respawn-pane replaces that one anyway. -t keeps the option on this
+# session, leaving any other tmux session on the server untouched.
 #
 # Launching the programs only after the layout is done matters: Neovim 0.12
 # sizes its UI once at startup and can miss resizes that arrive while it is
@@ -124,7 +210,8 @@ shell="${SHELL:-/bin/sh}"
 #
 # `; exec "$shell"` drops a pane into your shell once its program exits.
 exec tmux new-session -s "$session_name" -n "$window_name" -c "$start_directory" \; \
+  set-option -t "$session_name" default-command "${venv_prefix}exec \"$shell\"" \; \
   split-window -d "$layout" -l "$size" -c "$start_directory" \; \
   split-window -d -v -f -l "$console_size" -c "$start_directory" \; \
-  respawn-pane -k -t '{top-left}' -c "$start_directory" "$editor; exec \"$shell\"" \; \
-  respawn-pane -k -t "$side_pane" -c "$start_directory" "$side_command; exec \"$shell\""
+  respawn-pane -k -t '{top-left}' -c "$start_directory" "${venv_prefix}$editor; exec \"$shell\"" \; \
+  respawn-pane -k -t "$side_pane" -c "$start_directory" "${venv_prefix}$side_command; exec \"$shell\""

@@ -47,6 +47,8 @@ tide -d ~/projects/foo    # start somewhere else
 tide -V -l 30%            # stacked instead, secondary pane gets 30%
 tide -b 30%               # roomier console
 tide -e 'nvim .' -c lazygit
+tide -p .venv             # every pane inside the project's virtualenv
+tide -p ~/.venvs/proj     # or one that lives somewhere else
 ```
 
 If a session with the given name already exists, `tide` attaches to it instead of
@@ -63,6 +65,7 @@ creating a second one.
 | `-b SIZE` | Height of the bottom console: `1%`–`99%`, or an absolute number of rows | `15%` |
 | `-e EDITOR` | Command for the main pane | `nvim` |
 | `-c COMMAND` | Command for the split pane | `claude` |
+| `-p VENV` | Python virtualenv to launch every pane in | |
 | `-h` | Show help | |
 
 `-l` sizes the *split* pane, not the editor, so `-l 70%` gives 70% to `claude`
@@ -72,6 +75,13 @@ the console spans its full width whether you use `-H` or `-V`.
 `-e` and `-c` take a shell command, not just a program name, which is why
 `-e 'nvim .'` works. Quotes inside the value have to balance.
 
+`-p` takes the virtualenv directory, not the `activate` script inside it. A
+relative path is resolved against `-d`, so `tide -d ~/proj -p .venv` means
+`~/proj/.venv` — but the virtualenv does not have to live next to your code, and
+`-p ~/.venvs/thing` works just as well. tide checks for `VENV/bin/activate` and
+refuses to start if it is not there, so a typo fails immediately rather than
+three panes later.
+
 ## Behaviour worth knowing
 
 **Panes stay open when their program exits.** Quitting Neovim drops that pane
@@ -79,6 +89,28 @@ into your shell rather than closing it, the same as if you had opened the pane
 and run the program yourself. Exit the shell (`Ctrl+D` or `exit`) to actually
 close the pane. The console pane is already just your shell, so one `Ctrl+D`
 closes it.
+
+**Panes are plain shells, not login shells.** Left alone, tmux starts a pane that
+has no command of its own as a *login* shell, which on macOS re-runs
+`/etc/zprofile` and therefore `path_helper`, rebuilding `PATH` with the system
+directories first. tide sets tmux's `default-command`, so the console continues the
+shell you launched tide from instead of repeating login setup: your `~/.zprofile`
+runs once, in your terminal, rather than once in every pane. It also makes the
+console consistent with the other two panes, whose shells were already plain. This
+applies whether or not you use `-p`.
+
+**`-p` has no `deactivate`.** `deactivate` is a shell function, and every tide pane
+ends by replacing its shell — which functions do not survive. Leave the virtualenv
+by leaving the session. The virtualenv marker in your prompt still works, since
+prompts read `$VIRTUAL_ENV`, which is set.
+
+**`-p` on an already-running session asks first.** Attaching to an existing session
+re-runs none of the setup, so `-p` cannot affect its panes. Rather than appear to do
+nothing, tide says so and asks whether to attach anyway.
+
+**Using uv?** `uv run` prefers the project's own `.venv` over whatever `$VIRTUAL_ENV`
+says, unless you pass `--active`. Point `-p` at the project's `.venv` and the two
+never disagree.
 
 **It cannot be run from inside tmux.** Launch it from a plain terminal. Running
 it from within an existing tmux session fails with `sessions should be nested
