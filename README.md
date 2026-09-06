@@ -25,10 +25,11 @@ that the end of a synchronized update again triggers a redraw").
 tmux -V   # must report 3.7b or higher
 ```
 
-Nothing in the script enforces this yet ([issue
-#2](https://github.com/aiaia-ara/tide/issues/2)), so check it yourself if the
-editor pane comes up blank. Also required: whichever editor and secondary command
-you point it at — `nvim` and `claude` by default.
+tide checks this at startup and refuses to launch on anything older, so a blank
+editor pane is no longer something you have to diagnose. Versions it cannot rank,
+such as distro and git builds reporting `next-3.9`, are allowed through unchecked.
+Also required: whichever editor and secondary command you point it at — `nvim`
+and `claude` by default.
 
 ## Install
 
