@@ -121,6 +121,38 @@ if [[ -n $venv ]]; then
   venv=$resolved
 fi
 
+# Enforce the tmux version documented at the top of this file. On 3.7a the
+# editor pane just stays blank, with nothing said to explain it, so the check
+# earns its keep by turning a mystery into a sentence.
+#
+# The comparison is against a floor rather than a fixed version, because tmux
+# moves on its own schedule and every release above the floor is fine. Nothing
+# here needs editing when it does.
+#
+# version_key rewrites a version as a fixed-width string - "3.7a" becomes
+# "003007a" - so that an ordinary text comparison orders versions correctly.
+# The zero-padding is the load-bearing part: without it "3.10" sorts below
+# "3.7b", since a text comparison reads one character at a time and sees "1"
+# before "7" rather than ten before seven.
+#
+# A version that does not parse - "next-3.9", "3.7b-openbsd", a distro or git
+# build - is allowed through rather than blocked. tide cannot rank those, and
+# refusing to start on a tmux that is very likely fine is the worse failure.
+required_tmux="3.7b"
+
+version_key() {
+  [[ $1 =~ ^([0-9]+)\.([0-9]+)([a-z]?)$ ]] || return 1
+  printf '%03d%03d%s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+}
+
+tmux_version=$(tmux -V | cut -d' ' -f2)
+required_key=$(version_key "$required_tmux")
+if key=$(version_key "$tmux_version") && [[ $key < $required_key ]]; then
+  echo "Error: tmux $required_tmux or newer is required (found $tmux_version)." >&2
+  echo "On older tmux the editor pane stays blank until something forces a repaint." >&2
+  exit 1
+fi
+
 # If the session already exists, just attach.
 #
 # -p is the one option where that is worth saying out loud. Attaching runs none
