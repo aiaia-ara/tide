@@ -149,3 +149,6 @@ panes the same way keeps them in agreement.
 The editor's pane is targeted as `{top-left}`. With three panes open, `{top}`
 matches whichever of the two upper panes tmux reaches first, which is not
 necessarily the editor.
+
+The full reasoning, and the tmux and macOS behaviour it depends on, is in
+[docs/design.md](docs/design.md).
