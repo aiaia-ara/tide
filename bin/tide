@@ -181,13 +181,15 @@ shell="${SHELL:-/bin/sh}"
 # environment. tide's new-session attaches, so every command chained after it,
 # which is all of them, falls into the second case.
 #
-# That defeats both of the obvious alternatives. Exporting the virtualenv here
-# before `exec tmux` reaches the panes only when tide happens to fork the tmux
-# server, and a server outlives any one session, so usually it does not. And
-# `new-session -e PATH=`, `split-window -e PATH=` and `set-environment -g PATH`
-# are all overwritten by that same block, whatever the manual says.
+# That rules out exporting the virtualenv here before `exec tmux`: it reaches
+# the panes only when tide happens to fork the tmux server, and a server
+# outlives any one session, so usually it does not. `new-session -e PATH=` is
+# overwritten by that same block. On the later commands `-e PATH=` and
+# `set-environment PATH` do work, but only because the client has attached by
+# then, which is the same undocumented rule; `-e` also misses panes opened
+# later, and `set-environment -g` changes every session on the server.
 #
-# A command string depends on neither, since tmux runs it verbatim. Sourcing
+# A command string depends on none of that, since tmux runs it verbatim. Sourcing
 # bin/activate would add nothing over it either: each pane ends in
 # `exec "$shell"`, which keeps only exported variables.
 #
