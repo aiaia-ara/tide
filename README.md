@@ -121,23 +121,31 @@ consideration.
 
 ## Why it is built the way it is
 
-The script does everything in one tmux invocation, and deliberately builds the
-layout *before* launching either program: `new-session`, then both
-`split-window`s, then `respawn-pane` into each finished pane.
+The script does everything in one tmux invocation, and starts each program only
+once its pane has its final size: the console first, then an empty pane held for
+the editor, then the split pane with its command already in it, and the editor
+last.
 
 That ordering is load-bearing. Neovim 0.12 sizes its UI once at startup and can
 miss resize events that arrive while it is still initialising, since `vim.pack`
 runs synchronously during startup. Launching it into a pane that already has its
 final size means it is never resized afterwards, so it cannot end up permanently
-rendered at the wrong dimensions. The console split has to come before the
-respawns for the same reason — being full width, it shortens both of the panes
-above it.
+rendered at the wrong dimensions. The console comes first for the same reason —
+being full width, it shortens both of the panes above it.
 
-The console itself needs no `respawn-pane`: `split-window` already starts an
-interactive shell in the start directory, which is all a console is.
+Nothing is killed to make room for a program. Replacing a pane's running program
+closes its pseudo-terminal and opens a new one microseconds apart, and macOS has
+a bug there: when its table of pseudo-terminals is exactly full (16, 32, 48… in
+use across the whole machine), the new one fails to open. Earlier versions of
+tide did exactly that, and occasionally launched with a blank editor pane and no
+Claude. The editor's pane is now created empty and the editor started into it.
 
-Pane targets are `{top-left}` for the editor and a direction relative to it
-(`{right-of}` or `{down-of}`) for the split pane. The absolute tokens the script
-used when there were only two panes no longer work — with three panes open,
-`{top}` matches whichever of the two upper panes tmux reaches first, which is not
+The panes are built in a second window, and the first one is deleted at the end.
+tmux gives the pane `new-session` creates the `PATH` of the terminal you launched
+from, but every later pane the tmux server's `PATH`. Those differ when a server
+was already running and your `PATH` has changed since, so building all three
+panes the same way keeps them in agreement.
+
+The editor's pane is targeted as `{top-left}`. With three panes open, `{top}`
+matches whichever of the two upper panes tmux reaches first, which is not
 necessarily the editor.
