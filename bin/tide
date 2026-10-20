@@ -50,26 +50,21 @@ session_name="tide"
 window_name="main"
 start_directory="."
 layout="-h"
-side_pane='{right-of}'
 size="50%"
 console_size="15%"
 editor="nvim"
 side_command="claude"
 venv=""
 
-# -H and -V select the split orientation. The values they store are tmux's own
-# split-window flags, where -h splits side-by-side and -v splits stacked, plus
-# the pane target for the secondary command. That target is a direction
-# relative to the active (editor) pane because with three panes open the
-# absolute tokens stop being unique: {top} matches whichever of the two upper
-# panes tmux reaches first, not the editor.
+# -H and -V select the split orientation. The value they store is tmux's own
+# split-window flag, where -h splits side-by-side and -v splits stacked.
 while getopts ":s:w:d:HVl:b:e:c:p:h" opt; do
   case $opt in
     s) session_name="$OPTARG" ;;
     w) window_name="$OPTARG" ;;
     d) start_directory="$OPTARG" ;;
-    H) layout="-h"; side_pane='{right-of}' ;;
-    V) layout="-v"; side_pane='{down-of}' ;;
+    H) layout="-h" ;;
+    V) layout="-v" ;;
     l) size="$OPTARG" ;;
     b) console_size="$OPTARG" ;;
     e) editor="$OPTARG" ;;
@@ -219,7 +214,8 @@ fi
 # Everything happens in one tmux invocation, in this order:
 #
 #   1. new-session (attached)  - the session is created at the terminal's
-#      real size, since tmux gets it directly from the attaching client.
+#      real size, since tmux gets it directly from the attaching client. Its
+#      window is a throwaway, deleted in step 9.
 #   2. set-option              - default-command is what tmux runs in a pane
 #      started without a command. Empty, its default, means a login shell,
 #      which on macOS re-runs /etc/zprofile's path_helper; that rebuilds PATH
@@ -229,32 +225,69 @@ fi
 #      already plain - and skips a ~17ms ~/.zprofile in every pane. It is also
 #      where -p rides for the console and for any pane opened later, since
 #      those are the panes tmux starts without a command of their own.
-#   3. split-window x2         - the layout is built while every pane still
-#      runs a plain shell. (-d keeps focus on the editor pane.) The console
-#      split takes -f so it spans the full window width, underneath both of
-#      the other panes, in either orientation.
-#   4. respawn-pane x2         - the editor and the secondary command are
-#      launched into the finished, final-sized panes. The console needs no
-#      respawn: split-window has already given it an interactive shell in
-#      the start directory, which is all a console is.
+#   3. new-window -b           - the real window, placed before the throwaway
+#      so it ends up with the index it would have had without one. Its first
+#      pane is the console: an interactive shell in the start directory, which
+#      is all a console is.
+#   4. split-window -b -v -E   - an empty pane above the console, held for the
+#      editor. -E starts nothing in it.
+#   5. resize-pane             - the console down to its final height.
+#   6. split-window            - the secondary command's pane, split off the
+#      editor's with the command already in it. The layout is final from here
+#      on. (-d keeps focus on the editor pane.)
+#   7. send-keys -R            - resets the empty pane's terminal state.
+#   8. respawn-pane            - the editor, launched into its pane.
+#   9. kill-window -a          - deletes every window except the current one,
+#      which leaves only the real window.
 #
-# set-option has to precede the console split-window, since that is the pane
-# which reads the option. new-session creates the first pane before it is set,
-# but respawn-pane replaces that one anyway. -t keeps the option on this
-# session, leaving any other tmux session on the server untouched.
+# set-option has to precede new-window, since the console is the pane that
+# reads the option. new-session's pane starts before it is set, but that pane
+# is the throwaway. -t keeps the option on this session, leaving any other tmux
+# session on the server untouched.
 #
-# Launching the programs only after the layout is done matters: Neovim 0.12
-# sizes its UI once at startup and can miss resizes that arrive while it is
-# still initializing (vim.pack runs synchronously during startup), leaving
-# it permanently rendered at the wrong size. Done this way, its pane already
-# has its final size before it starts and is never resized afterwards. The
-# console split has to come before the respawns for the same reason: being
-# full width, it shortens both of the panes above it.
+# No program starts until its pane has its final size: Neovim 0.12 sizes its
+# UI once at startup and can miss resizes that arrive while it is still
+# initializing (vim.pack runs synchronously during startup), leaving it
+# permanently rendered at the wrong size. So the console, which spans the full
+# width beneath both other panes, is sized first, and step 6 is the last change
+# to the layout.
+#
+# Nothing is killed to make room for a program, which is why the editor's pane
+# starts empty instead of holding a placeholder shell. Replacing a running
+# program (respawn-pane -k) closes the pane's pty and opens a new one
+# microseconds apart, and macOS has a bug there: when its pty table is exactly
+# full (16, 32, 48... ptys in use across the whole machine), a pty released
+# while another is being opened makes that open fail with "Device not
+# configured". That leaves the editor pane blank, and since a failed command
+# makes tmux drop the rest of the chain, the secondary command never starts
+# either. Opening a pty while none is being released works at any fill level;
+# the table just grows.
+#
+# The throwaway window is there for PATH. tmux gives new-session's own pane the
+# PATH of the terminal tide runs in, and every pane created after the client
+# attaches the session environment's, which is the server's (see the -p comment
+# above). The two differ whenever a server was already running and the
+# terminal's PATH has changed since. Made after the attach, all three real panes
+# always agree. The throwaway's pty is the only one tide closes, and it closes
+# it last, with nothing opened after it.
+#
+# A pane created with -E is set up for no program at all, and tmux turns on a
+# mode in it where a bare line feed also returns the cursor to the start of the
+# line. A program respawned into the pane would inherit that mode; send-keys -R
+# clears it, so the editor starts in the same terminal state as any other pane.
+#
+# The editor's pane is targeted as {top-left}: with three panes open, {top}
+# would match whichever of the two upper panes tmux reaches first, not
+# necessarily the editor. {down-of} in step 5 can only be the console, since
+# just two panes exist at that point.
 #
 # `; exec "$shell"` drops a pane into your shell once its program exits.
 exec tmux new-session -s "$session_name" -n "$window_name" -c "$start_directory" \; \
   set-option -t "$session_name" default-command "${venv_prefix}exec \"$shell\"" \; \
-  split-window -d "$layout" -l "$size" -c "$start_directory" \; \
-  split-window -d -v -f -l "$console_size" -c "$start_directory" \; \
-  respawn-pane -k -t '{top-left}' -c "$start_directory" "${venv_prefix}$editor; exec \"$shell\"" \; \
-  respawn-pane -k -t "$side_pane" -c "$start_directory" "${venv_prefix}$side_command; exec \"$shell\""
+  new-window -b -n "$window_name" -c "$start_directory" \; \
+  split-window -b -v -E \; \
+  resize-pane -t '{down-of}' -y "$console_size" \; \
+  split-window -d "$layout" -l "$size" -c "$start_directory" "${venv_prefix}$side_command; exec \"$shell\"" \; \
+  send-keys -R -t '{top-left}' \; \
+  respawn-pane -t '{top-left}' -c "$start_directory" "${venv_prefix}$editor; exec \"$shell\"" \; \
+  kill-window -a
